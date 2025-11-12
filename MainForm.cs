@@ -10,7 +10,9 @@ using System.Linq;
 using System.IO;
 using Newtonsoft.Json;
 using Lers.Core;
+using System.Threading; // Добавить в using, если ещё не добавлено
 // using ArshinSearch.Properties; // больше не нужно
+// Удалить using PuppeteerSharp; и PuppeteerSharp.Media;
 
 namespace ArshinSearch
 {
@@ -21,10 +23,16 @@ namespace ArshinSearch
 		private ArshinApi arshinApi = new ArshinApi();
 		private Equipment[] equipmentList;
 		// private TextBox textBoxMitNumber;
+		// Удаляю поле ToolTip и его инициализацию
+		// Добавляю поле для контекстного меню
+		private ContextMenuStrip dateContextMenu;
+		private int contextMenuRowIndex = -1;
+		private CancellationTokenSource ownerSearchCts;
 
 		public MainForm()
 		{
 			InitializeComponent();
+			comboBox5.SelectedIndex = 0;
 			// Включаем двойную буферизацию для MainView
 			typeof(DataGridView).InvokeMember("DoubleBuffered",
 				System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.SetProperty,
@@ -34,13 +42,28 @@ namespace ArshinSearch
 			MainView.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
 			MainView.RowTemplate.Height = 36;
 
-			// Инициализация textBoxMitNumber для предотвращения ошибки компиляции
-			// textBoxMitNumber = new TextBox();
+
 			MainView.CellMouseClick += MainView_CellMouseClick;
+			MainView.ShowCellToolTips = true;
+			MainView.CellToolTipTextNeeded -= MainView_CellToolTipTextNeeded;
+			MainView.CellValueChanged += MainView_CellValueChanged;
+			MainView.CurrentCellDirtyStateChanged += MainView_CurrentCellDirtyStateChanged;
+			MainView.CellClick += MainView_CellClick;
+			MainView.ColumnHeaderMouseClick += MainView_ColumnHeaderMouseClick;
 
 			// Ограничить ширину столбца LersMeasurePoint
-			MainView.Columns["LersMeasurePoint"].Width = 120;
-			MainView.Columns["LersMeasurePoint"].MinimumWidth = 60;
+			//MainView.Columns["LersMeasurePoint"].Width = 120;
+			//MainView.Columns["LersMeasurePoint"].MinimumWidth = 60;
+
+			// Инициализация контекстного меню для даты поверки
+			dateContextMenu = new ContextMenuStrip();
+			var syncItem = new ToolStripMenuItem("⟳ Синхронизировать дату поверки");
+			syncItem.Click += async (s, e) =>
+			{
+				if (contextMenuRowIndex >= 0)
+					await UpdateCalibrationByRowIndex(contextMenuRowIndex);
+			};
+			dateContextMenu.Items.Add(syncItem);
 
 			// Загружаем историю для всех ComboBox
 			ComboHistoryManager.Load();
@@ -50,10 +73,14 @@ namespace ArshinSearch
 			comboBox1.Leave += (s, e) => ComboBox_Leave(comboBox1, "comboBox1");
 			comboBox2.Leave += (s, e) => ComboBox_Leave(comboBox2, "comboBox2");
 			comboBox3.Leave += (s, e) => ComboBox_Leave(comboBox3, "comboBox3");
+			// progressBar1.Paint += ProgressBar1_Paint; // Удалить строку подписки на Paint
 
 			// Подписка на событие загрузки формы
 			this.Load += MainForm_Load;
-		}
+
+}
+
+
 
 		internal void Initialize(IPluginHost host)
 		{
@@ -62,8 +89,6 @@ namespace ArshinSearch
 
 		private async void MainForm_Load(object sender, EventArgs e)
 		{
-			if (host == null)
-				return;
 			try
 			{
 				var equipmentManager = host.Server.Equipment;
@@ -76,42 +101,47 @@ namespace ArshinSearch
 			}
 		}
 
-		private void MainView_CellContentClick(object sender, DataGridViewCellEventArgs e)
-		{
-			if (e.ColumnIndex == MainView.Columns["DgridDocnumLink"].Index && MainView.SelectedCells.Count > 0)
-			{
-				try
-				{
-					var cellValue = MainView.SelectedCells[0].Tag?.ToString();
-					if (!string.IsNullOrEmpty(cellValue))
-					{
-						System.Diagnostics.Process.Start("https://fgis.gost.ru/fundmetrology/cm/results/" + cellValue);
-					}
-				}
-				catch (Exception ex)
-				{
-					MessageBox.Show($"Не удалось открыть ссылку: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-				}
-			}
-		}
-
 		private async void button1_Click(object sender, EventArgs e)
 		{
-			if (MainView.RowCount > 0)
+			if (ownerSearchCts != null)
 			{
-				for (int i = 0; i < MainView.RowCount; i++)
+				// Уже идёт поиск — останавливаем
+				ownerSearchCts.Cancel();
+				return;
+			}
+			MainView.Columns["DgridOwner"].Visible = true;
+			button1.Text = "Остановить поиск";
+			ownerSearchCts = new CancellationTokenSource();
+			var token = ownerSearchCts.Token;
+			try
+			{
+				if (MainView.RowCount > 0)
 				{
-					var row = MainView.Rows[i];
-					if (row.Cells[MainView.Columns["DgridDocnumLink"].Index] == null) continue;
-					string vri_id = row.Cells[MainView.Columns["DgridDocnumLink"].Index].Tag?.ToString();
-					if (!string.IsNullOrEmpty(vri_id))
+					for (int i = 0; i < MainView.RowCount; i++)
 					{
-						string miOwner = await arshinApi.GetMiOwnerAsync(vri_id);
-						if (row.Cells[MainView.Columns["DgridOwner"].Index] != null)
-							row.Cells[MainView.Columns["DgridOwner"].Index].Value = miOwner;
-						await Task.Delay(200);
+						if (token.IsCancellationRequested) break;
+						var row = MainView.Rows[i];
+						// Проверяем, отмечена ли строка галочкой
+						if (!(row.Cells[MainView.Columns["Check"].Index].Value is bool isChecked) || !isChecked)
+							continue;
+						if (row.Cells[MainView.Columns["DgridDocnumLink"].Index] == null) continue;
+						string vri_id = row.Cells[MainView.Columns["DgridDocnumLink"].Index].Tag?.ToString();
+						if (!string.IsNullOrEmpty(vri_id))
+						{
+							string miOwner = await arshinApi.GetMiOwnerAsync(vri_id);
+							if (row.Cells[MainView.Columns["DgridOwner"].Index] != null)
+								row.Cells[MainView.Columns["DgridOwner"].Index].Value = miOwner;
+							await Task.Delay(200, token);
+						}
 					}
 				}
+			}
+			catch (OperationCanceledException) { /* поиск остановлен */ }
+			finally
+			{
+				ownerSearchCts.Dispose();
+				ownerSearchCts = null;
+				button1.Text = "Найти владельцев СИ";
 			}
 		}
 
@@ -137,8 +167,8 @@ namespace ArshinSearch
 		{
 			button2.Enabled = false;
 			MainView.Rows.Clear();
-			textBox2.Text = "";
 			button1.Enabled = false;
+			MainView.Columns["DgridOwner"].Visible = false;
 
 			var searchParams = GetSearchParamsFromForm();
 			// Проверка: хотя бы одно поле должно быть заполнено
@@ -152,123 +182,281 @@ namespace ArshinSearch
 				return;
 			}
 
-			var (docs, numFound, error) = await arshinApi.SearchAsync(searchParams);
-			if (error != null)
+			// Получаем лимит из comboBox5
+			int limit = 100;
+			if (comboBox5.SelectedItem != null && int.TryParse(comboBox5.SelectedItem.ToString(), out int parsedLimit))
+				limit = parsedLimit;
+
+			var allDocs = new List<VriDoc>();
+			int numFound = 0;
+			string error = null;
+			int start = 0;
+			const int rows = 100; // размер порции за 1 запрос всегда 100
+			bool first = true;
+			progressBar1.Minimum = 0;
+			progressBar1.Value = 0;
+			progressBar1.Maximum = limit;
+			int maxApiRequests = 10;
+			int apiRequestCount = 0;
+			while (allDocs.Count < limit && apiRequestCount < maxApiRequests)
 			{
-				MessageBox.Show("Ошибка при получении данных: " + error, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-				button2.Enabled = true;
-				return;
-			}
-			textBox2.Text = numFound.ToString();
-			foreach (var doc in docs)
-			{
-				int rowIndex = MainView.Rows.Add(doc.OrgTitle, doc.MiMitnumber, doc.MiMititle, doc.MiMitype, doc.MiModification, doc.MiNumber, doc.MiDate, doc.ValidDate, doc.Applicability, doc.MiDocnum, "-");
-				// Устанавливаем Tag для ссылки
-				MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDocnumLink"].Index].Tag = doc.VriId;
-				// Проверка заводского номера и регистрационного номера типа СИ по именам столбцов
-				var serialCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridNumber"].Index];
-				var regnumCell = MainView.Rows[rowIndex].Cells[MainView.Columns["Dgridmimitnumber"].Index];
-				string serialValue = serialCell.Value?.ToString();
-				string regnumValue = regnumCell.Value?.ToString();
-				var dateCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDate"].Index];
-				string dateValue = dateCell.Value?.ToString();
-				bool found = false;
-				Equipment foundEq = null;
-				// --- Новая логика для двух номеров ---
-				List<string> serialNumbers = new List<string>();
-				if (!string.IsNullOrEmpty(serialValue))
+				searchParams.StartPos = start.ToString();
+				var (docs, found, err) = await arshinApi.SearchAsync(searchParams, rows);
+				apiRequestCount++;
+				if (first)
 				{
-					serialNumbers = serialValue.Split(new[] { "; " }, StringSplitOptions.RemoveEmptyEntries).ToList();
+					numFound = found;
+					error = err;
+					first = false;
+					progressBar1.Maximum = Math.Min(limit, numFound > 0 ? numFound : limit);
+					// Сразу выводим общее количество найденных записей
+					this.Invoke((Action)(() => {
+						textBox2.Text = $"0/{numFound}";
+					}));
 				}
-				// Если два номера, оба должны быть найдены
-				List<Equipment> foundEquipments = new List<Equipment>();
-				if (serialNumbers.Count > 0 && !string.IsNullOrEmpty(regnumValue) && equipmentList != null)
+				if (err != null)
 				{
-					foreach (var sn in serialNumbers)
+					MessageBox.Show("Ошибка при получении данных: " + err, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+					button2.Enabled = true;
+					return;
+				}
+				if (docs.Count == 0) break;
+				foreach (var doc in docs)
+				{
+					if (allDocs.Count >= limit) break;
+					// --- Новый блок: вычисляем foundInner ДО добавления строки ---
+					int rowIndex = -1;
+					bool foundInner = false;
+					Equipment foundEq = null;
+					List<string> serialNumbers = new List<string>();
+					if (!string.IsNullOrEmpty(doc.MiNumber))
 					{
-						var foundEquipment = equipmentList.FirstOrDefault(eq => eq.SerialNumber == sn &&
-							(
-								!string.IsNullOrEmpty(eq.StateRegisterNumber)
-									? eq.StateRegisterNumber == regnumValue
-									: (eq.Model != null && eq.Model.StateRegisterNumbers != null && eq.Model.StateRegisterNumbers.Any(rn => rn.Number == regnumValue))
-							)
-						);
-						if (foundEquipment != null)
+						serialNumbers = doc.MiNumber.Split(new[] { "; " }, StringSplitOptions.RemoveEmptyEntries).ToList();
+					}
+					List<Equipment> foundEquipments = new List<Equipment>();
+					if (serialNumbers.Count > 0 && !string.IsNullOrEmpty(doc.MiMitnumber) && equipmentList != null)
+					{
+						foreach (var sn in serialNumbers)
 						{
-							foundEquipments.Add(foundEquipment);
+							var foundEquipment = equipmentList.FirstOrDefault(eq => eq.SerialNumber == sn &&
+								(!string.IsNullOrEmpty(eq.StateRegisterNumber)
+									? eq.StateRegisterNumber == doc.MiMitnumber
+									: (eq.Model != null && eq.Model.StateRegisterNumbers != null && eq.Model.StateRegisterNumbers.Any(rn => rn.Number == doc.MiMitnumber))));
+							if (foundEquipment != null)
+							{
+								foundEquipments.Add(foundEquipment);
+							}
 						}
-					}
-					if (serialNumbers.Count == 2)
-					{
-						found = foundEquipments.Count == 2;
-						if (found) foundEq = foundEquipments[0]; // Для дальнейшей логики (точка измерения и дата)
-					}
-					else // один номер
-					{
-						found = foundEquipments.Count == 1;
-						if (found) foundEq = foundEquipments[0];
-					}
-				}
-				if (found)
-				{
-					serialCell.Style.BackColor = System.Drawing.Color.LightGreen;
-					// Заполнение столбца LersMeasurePoint
-					var mpCell = MainView.Rows[rowIndex].Cells[MainView.Columns["LersMeasurePoint"].Index];
-					if (foundEq != null)
-					{
-						var points = foundEq.GetRelatedMeasurePoints();
-						if (points != null && points.Length > 0)
+						if (serialNumbers.Count == 2)
 						{
-							mpCell.Value = string.Join(", ", points.Select(p => p.FullTitle));
+							foundInner = foundEquipments.Count == 2;
+							if (foundInner) foundEq = foundEquipments[0];
 						}
 						else
 						{
-							mpCell.Value = string.Empty;
+							foundInner = foundEquipments.Count == 1;
+							if (foundInner) foundEq = foundEquipments[0];
 						}
 					}
-					// --- Новая логика сравнения даты поверки для двух номеров ---
-					if (!string.IsNullOrEmpty(dateValue) && foundEquipments.Count > 0 && found)
+					// --- Фильтрация по checkBox1 ---
+					if (checkBox1.Checked && !foundInner)
 					{
-						DateTime parsedDate;
-						bool parsed = DateTime.TryParseExact(dateValue, "dd.MM.yy", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsedDate);
-						if (parsed)
+						continue; // пропускаем строки без совпадения
+					}
+					allDocs.Add(doc);
+					// --- Далее вся логика по поиску оборудования, подсветке, заполнению ячеек ---
+					// Для корректной работы, если используются MainView.Rows[rowIndex], всё это должно быть внутри Invoke
+					this.Invoke((Action)(() =>
+					{
+						rowIndex = MainView.Rows.Add(
+							false,                // Check (чекбокс, по умолчанию не отмечен)
+							doc.OrgTitle,         // DgridOrg
+							doc.MiMitnumber,      // Dgridmimitnumber
+							doc.MiMititle,        // Dgridminame
+							doc.MiMitype,         // Drgridmitype
+							doc.MiModification,   // DgridName
+							doc.MiNumber,         // DgridNumber
+							doc.MiDate,           // DgridDate
+							doc.ValidDate,        // Dgriddatefor
+							doc.Applicability,    // DgridAppc
+							doc.MiDocnum,         // DgridDocnumLink
+							"-",                  // DgridOwner
+							"",                   // LersMeasurePoint
+							""                    // DgridLersDate
+						);
+						// Устанавливаем Tag для ссылки
+						MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDocnumLink"].Index].Tag = doc.VriId;
+					}));
+					// --- Остальной код внутри Invoke ---
+					this.Invoke((Action)(() =>
+					{
+						var serialCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridNumber"].Index];
+						var regnumCell = MainView.Rows[rowIndex].Cells[MainView.Columns["Dgridmimitnumber"].Index];
+						string serialValue = serialCell.Value?.ToString();
+						string regnumValue = regnumCell.Value?.ToString();
+						var dateCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDate"].Index];
+						string dateValue = dateCell.Value?.ToString();
+						// --- Существующий код подсветки и заполнения ---
+						if (foundInner)
 						{
-							bool allMatch = true;
-							foreach (var eq in foundEquipments)
+							serialCell.Style.BackColor = System.Drawing.Color.LightGreen;
+							var mpCell = MainView.Rows[rowIndex].Cells[MainView.Columns["LersMeasurePoint"].Index];
+							if (foundEq != null)
 							{
-								if (!eq.LastCalibrationDate.HasValue || eq.LastCalibrationDate.Value.Date != parsedDate.Date)
+								var points = foundEq.GetRelatedMeasurePoints();
+								if (points != null && points.Length > 0)
 								{
-									allMatch = false;
-									break;
+									mpCell.Value = string.Join(", ", points.Select(p => p.FullTitle));
+								}
+								else
+								{
+									mpCell.Value = string.Empty;
 								}
 							}
-							if (allMatch)
+							if (!string.IsNullOrEmpty(dateValue) && foundEquipments.Count > 0 && foundInner)
 							{
-								dateCell.Style.BackColor = System.Drawing.Color.LightGreen;
-							}
-							else
-							{
-								dateCell.Style.BackColor = System.Drawing.Color.Orange;
+								DateTime parsedDate;
+								bool parsed = DateTime.TryParseExact(dateValue, "dd.MM.yy", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsedDate);
+								if (parsed)
+								{
+									bool allMatch = true;
+									bool anyNull = false;
+									foreach (var eq in foundEquipments)
+									{
+										if (!eq.LastCalibrationDate.HasValue)
+										{
+											anyNull = true;
+											allMatch = false;
+										}
+										else if (eq.LastCalibrationDate.Value.Date != parsedDate.Date)
+										{
+											allMatch = false;
+										}
+									}
+									if (allMatch)
+									{
+										dateCell.Style.BackColor = System.Drawing.Color.LightGreen;
+									}
+									else if (!allMatch || anyNull)
+									{
+										dateCell.Style.BackColor = System.Drawing.Color.Orange;
+										string icon = " ⟳";
+										if (dateCell.Value != null && !dateCell.Value.ToString().Contains(icon))
+										{
+											dateCell.Value = dateCell.Value.ToString() + icon;
+										}
+									}
+								}
 							}
 						}
-					}
+						var lersDateCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridLersDate"].Index];
+						List<string> lersDates = new List<string>();
+						if (serialNumbers.Count > 0 && !string.IsNullOrEmpty(regnumValue) && equipmentList != null)
+						{
+							foreach (var sn in serialNumbers)
+							{
+								var foundEquipment = equipmentList.FirstOrDefault(eq => eq.SerialNumber == sn &&
+									(!string.IsNullOrEmpty(eq.StateRegisterNumber)
+										? eq.StateRegisterNumber == regnumValue
+										: (eq.Model != null && eq.Model.StateRegisterNumbers != null && eq.Model.StateRegisterNumbers.Any(rn => rn.Number == regnumValue))));
+								if (foundEquipment != null)
+								{
+									string dateStr = foundEquipment.LastCalibrationDate.HasValue ? foundEquipment.LastCalibrationDate.Value.ToString("dd.MM.yy") : "нет данных";
+									lersDates.Add(dateStr);
+								}
+							}
+						}
+						lersDateCell.Value = lersDates.Count > 0 ? string.Join("\n", lersDates) : "нет данных";
+						// Обновление прогресса
+						progressBar1.Value = Math.Min(allDocs.Count, progressBar1.Maximum);
+						progressBar1.Refresh();
+						textBox2.Text = $"{progressBar1.Value}/{numFound}";
+					}));
+					await Task.Yield(); // Позволяет UI отрисоваться
 				}
+				if (allDocs.Count >= numFound) break;
+				start += rows;
+				await Task.Delay(600); // Задержка между запросами
 			}
 			button2.Enabled = true;
 			if (MainView.RowCount > 0) button1.Enabled = true;
+			UpdateActionButtonsVisibility();
+			progressBar1.Value = Math.Min(Math.Min(allDocs.Count, limit), progressBar1.Maximum);
+			progressBar1.Value = progressBar1.Maximum;
 		}
 
 		private async void MainView_CellMouseClick(object sender, DataGridViewCellMouseEventArgs e)
 		{
-			if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && e.ColumnIndex == MainView.Columns["DgridDocnumLink"].Index)
+			// --- Открытие или сохранение PDF по клику на DgridDocnumLink ---
+			if (e.RowIndex >= 0 && e.ColumnIndex == MainView.Columns["DgridDocnumLink"].Index)
 			{
 				var cell = MainView.Rows[e.RowIndex].Cells[MainView.Columns["DgridDocnumLink"].Index];
 				var vriId = cell.Tag?.ToString();
 				if (!string.IsNullOrEmpty(vriId))
 				{
 					string url = $"https://fgis.gost.ru/fundmetrology/cm/results/{vriId}";
-					Clipboard.SetText(url);
-					await ShowCopiedInCell(cell, vriId);
+					if (e.Button == MouseButtons.Left)
+					{
+						try
+						{
+							System.Diagnostics.Process.Start(url);
+						}
+						catch (Exception ex)
+						{
+							MessageBox.Show($"Не удалось открыть ссылку: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+						}
+					}
+					else if (e.Button == MouseButtons.Right)
+					{
+						if (!string.IsNullOrEmpty(vriId))
+						{
+							try
+							{
+								string urlToCopy = $"https://fgis.gost.ru/fundmetrology/cm/results/{vriId}";
+								Clipboard.SetText(urlToCopy);
+								await ShowCopiedInCell(cell, vriId);
+							}
+							catch (Exception ex)
+							{
+								MessageBox.Show($"Ошибка копирования ссылки: {ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+							}
+						}
+					}
+				}
+				return;
+			}
+            // --- Новый функционал: PUT по клику на оранжевую ячейку DgridDate ---
+            // УДАЛЕНО: обработка синхронизации по левому клику на оранжевой ячейке даты поверки
+            // --- Конец нового функционала ---
+			// Контекстное меню для даты поверки
+			if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && e.ColumnIndex == MainView.Columns["DgridDate"].Index)
+			{
+				// Проверяем, найдено ли оборудование для этой строки
+				var serialCell = MainView.Rows[e.RowIndex].Cells[MainView.Columns["DgridNumber"].Index];
+				var regnumCell = MainView.Rows[e.RowIndex].Cells[MainView.Columns["Dgridmimitnumber"].Index];
+				var serialValue = serialCell.Value?.ToString();
+				var regnumValue = regnumCell.Value?.ToString();
+				var serialNumbers = serialValue?.Split(new[] { "; " }, StringSplitOptions.RemoveEmptyEntries) ?? new string[0];
+				var foundEquipments = new List<Lers.Core.Equipment>();
+				if (serialNumbers.Length > 0 && !string.IsNullOrEmpty(regnumValue) && equipmentList != null)
+				{
+					foreach (var sn in serialNumbers)
+					{
+						var foundEquipment = equipmentList.FirstOrDefault(eq => eq.SerialNumber == sn &&
+							(!string.IsNullOrEmpty(eq.StateRegisterNumber)
+								? eq.StateRegisterNumber == regnumValue
+								: (eq.Model != null && eq.Model.StateRegisterNumbers != null && eq.Model.StateRegisterNumbers.Any(rn => rn.Number == regnumValue))));
+						if (foundEquipment != null)
+						{
+							foundEquipments.Add(foundEquipment);
+						}
+					}
+				}
+				if (foundEquipments.Count > 0)
+				{
+					contextMenuRowIndex = e.RowIndex;
+					dateContextMenu.Show(MainView, MainView.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, true).Location);
+					return;
 				}
 			}
 		}
@@ -281,6 +469,112 @@ namespace ArshinSearch
 			await Task.Delay(2000);
 			cell.Value = originalValue;
 			cell.Style.ForeColor = System.Drawing.Color.Black;
+		}
+
+		private async Task UpdateCalibrationByRowIndex(int rowIndex)
+		{
+			var cell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDate"].Index];
+			// Получаем arshinId из DgridDocnumLink (Tag)
+			var arshinCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDocnumLink"].Index];
+			var arshinId = arshinCell.Tag?.ToString();
+			if (string.IsNullOrEmpty(arshinId))
+			{
+				MessageBox.Show("Не удалось определить arshinId.");
+				return;
+			}
+			// Получаем equipmentId через Sensor (ищем по серийному номеру и рег. номеру)
+			var serialCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridNumber"].Index];
+			var regnumCell = MainView.Rows[rowIndex].Cells[MainView.Columns["Dgridmimitnumber"].Index];
+			var serialValue = serialCell.Value?.ToString();
+			var regnumValue = regnumCell.Value?.ToString();
+			var serialNumbers = serialValue?.Split(new[] { "; " }, StringSplitOptions.RemoveEmptyEntries) ?? new string[0];
+			var foundEquipments = new List<Lers.Core.Equipment>();
+			if (serialNumbers.Length > 0 && !string.IsNullOrEmpty(regnumValue) && equipmentList != null)
+			{
+				foreach (var sn in serialNumbers)
+				{
+					var foundEquipment = equipmentList.FirstOrDefault(eq => eq.SerialNumber == sn &&
+						(!string.IsNullOrEmpty(eq.StateRegisterNumber)
+							? eq.StateRegisterNumber == regnumValue
+							: (eq.Model != null && eq.Model.StateRegisterNumbers != null && eq.Model.StateRegisterNumbers.Any(rn => rn.Number == regnumValue))));
+					if (foundEquipment != null)
+					{
+						foundEquipments.Add(foundEquipment);
+					}
+				}
+			}
+			if (foundEquipments.Count == 0)
+			{
+				MessageBox.Show("Не удалось определить equipmentId.");
+				return;
+			}
+			// Выполняем PUT-запрос для каждого найденного оборудования
+			var restClient = host.Server.RestClient;
+			var errors = new List<string>();
+			bool allSuccess = true;
+			foreach (var eq in foundEquipments)
+			{
+				string route = $"/api/v0.1/Core/Equipment/ArshinCalibration/{eq.Id}/{arshinId}";
+				var response = await restClient.PutAsync(route, new { }, CancellationToken.None);
+				if ((int)response.StatusCode != 200)
+				{
+					allSuccess = false;
+					string result = await response.Content.ReadAsStringAsync();
+					errors.Add($"{eq.SerialNumber}: {response.StatusCode} {result}");
+				}
+			}
+			if (allSuccess)
+			{
+				// Перекрасить ячейку в зелёный и убрать иконку
+				cell.Style.BackColor = System.Drawing.Color.LightGreen;
+				string icon = " ⟳";
+				if (cell.Value != null && cell.Value.ToString().Contains(icon))
+				{
+					cell.Value = cell.Value.ToString().Replace(icon, "");
+				}
+				MainView.Cursor = Cursors.Default;
+				// Обновить значение в DgridLersDate
+				var dateCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridDate"].Index];
+				var lersDateCell = MainView.Rows[rowIndex].Cells[MainView.Columns["DgridLersDate"].Index];
+				string dateValue = dateCell.Value?.ToString() ?? "";
+				int iconIndex = dateValue.IndexOf(" ⟳");
+				if (iconIndex >= 0)
+					dateValue = dateValue.Substring(0, iconIndex);
+				dateValue = dateValue.Trim();
+				lersDateCell.Value = dateValue;
+			}
+			if (errors.Count > 0)
+			{
+				MessageBox.Show("Ошибки при обновлении:\n" + string.Join("\n", errors), "Результат ArshinCalibration");
+			}
+		}
+
+		private void MainView_CellValueChanged(object sender, DataGridViewCellEventArgs e)
+		{
+			if (e.ColumnIndex == MainView.Columns["Check"].Index)
+			{
+				UpdateActionButtonsVisibility();
+			}
+		}
+		private void MainView_CurrentCellDirtyStateChanged(object sender, EventArgs e)
+		{
+			if (MainView.CurrentCell != null && MainView.CurrentCell.ColumnIndex == MainView.Columns["Check"].Index)
+			{
+				MainView.CommitEdit(DataGridViewDataErrorContexts.Commit);
+			}
+		}
+		private void UpdateActionButtonsVisibility()
+		{
+			bool anyChecked = false;
+			foreach (DataGridViewRow row in MainView.Rows)
+			{
+				if (row.Cells[MainView.Columns["Check"].Index].Value is bool isChecked && isChecked)
+				{
+					anyChecked = true;
+					break;
+				}
+			}
+			button1.Visible = anyChecked;
 		}
 
 		private class ComboHistoryItem
@@ -365,5 +659,34 @@ namespace ArshinSearch
 				LoadComboBoxHistory(comboBox, key);
 			}
 		}
-	}
+
+		private void MainView_CellToolTipTextNeeded(object sender, DataGridViewCellToolTipTextNeededEventArgs e)
+		{
+			// Удаляю все упоминания ToolTip, lersDateToolTip и связанные с ними строки
+		}
+
+		private void MainView_CellClick(object sender, DataGridViewCellEventArgs e)
+		{
+			// Удалено: ручная инверсия чекбокса по клику
+		}
+
+		private void MainView_ColumnHeaderMouseClick(object sender, DataGridViewCellMouseEventArgs e)
+		{
+			if (e.ColumnIndex == MainView.Columns["Check"].Index)
+			{
+				bool anyUnchecked = MainView.Rows.Cast<DataGridViewRow>()
+					.Any(row => !(row.Cells[e.ColumnIndex].Value is bool b) || !b);
+				foreach (DataGridViewRow row in MainView.Rows)
+				{
+					row.Cells[e.ColumnIndex].Value = anyUnchecked;
+				}
+				UpdateActionButtonsVisibility();
+			}
+		}
+
+        private void checkBox1_CheckedChanged(object sender, EventArgs e)
+        {
+
+        }
+    }
 }

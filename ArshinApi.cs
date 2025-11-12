@@ -75,6 +75,37 @@ namespace ArshinSearch
             return (docs, numFound, error);
         }
 
+        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams, int rows)
+        {
+            var docs = new List<VriDoc>();
+            int numFound = 0;
+            string error = null;
+
+            string requestend = $"q=*&fl=vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number,verification_date,valid_date,applicability,result_docnum&sort=verification_date+desc,org_title+asc&rows={rows}&start=" + searchParams.StartPos;
+            if (!string.IsNullOrEmpty(searchParams.Number)) requestend = $"fq=mi.number:{searchParams.Number}&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.Org)) requestend = $"fq=org_title:*{searchParams.Org}*&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.Type)) requestend = $"fq=mi.mitype:*{searchParams.Type}*&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.MitNumber)) requestend = $"fq=mi.mitnumber:{searchParams.MitNumber}&" + requestend;
+            // Здесь можно добавить обработку новых полей
+
+            try
+            {
+                string responseBody = await GetWithRetryAsync(BaseRequest + requestend);
+                var jsonResponse = JObject.Parse(responseBody);
+                numFound = (int?)jsonResponse.SelectToken("response.numFound") ?? 0;
+                var docsArray = (JArray)jsonResponse["response"]["docs"];
+                foreach (var doc in docsArray)
+                {
+                    docs.Add(ParseVriDoc(doc));
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+            return (docs, numFound, error);
+        }
+
         public async Task<string> GetMiOwnerAsync(string vriId)
         {
             try

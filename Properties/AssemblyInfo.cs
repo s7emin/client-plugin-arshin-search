@@ -28,8 +28,8 @@ using System.Runtime.InteropServices;
 // You can specify all the values or you can default the Build and Revision Numbers 
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("3.62.0")]
-[assembly: AssemblyFileVersion("3.62.0")]
+[assembly: AssemblyVersion("3.63.0")]
+[assembly: AssemblyFileVersion("3.63.0")]
 [assembly: AssemblyPlugin("fffe8ca3-5690-4d07-bef0-cd8f00c9f9a3")]
 [assembly: AssemblyPluginWebsite("https://github.com/s7emin/lers-plugins")]
 [assembly: AssemblyPluginEmail("s@cemin.ru")]
