@@ -15,9 +15,9 @@
     <None Include="App.config" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Lers.Framework" Version="3.63.2" />
-    <PackageReference Include="Lers.Plugins" Version="3.63.2" />
-    <PackageReference Include="Lers.Utils" Version="3.63.2" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="9.0.7" />
+    <PackageReference Include="Lers.Framework" Version="3.64.3" />
+    <PackageReference Include="Lers.Plugins" Version="3.64.3" />
+    <PackageReference Include="Lers.Utils" Version="3.64.3" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.2" />
   </ItemGroup>
 </Project>
