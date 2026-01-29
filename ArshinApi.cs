@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Net.Http;
 using System.Threading.Tasks;
-using System.Web;
 
 namespace ArshinSearch
 {
@@ -45,29 +44,49 @@ namespace ArshinSearch
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36");
         }
 
-        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams, int rows = 100)
+        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams)
         {
             var docs = new List<VriDoc>();
             int numFound = 0;
             string error = null;
 
-            var query = HttpUtility.ParseQueryString(string.Empty);
-
-            // Обязательные параметры
-            query["q"] = "*";
-            query["fl"] = "vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number,verification_date,valid_date,applicability,result_docnum";
-            query["sort"] = "verification_date desc,org_title asc";
-            query["rows"] = rows.ToString();
-            query["start"] = searchParams.StartPos;
-
-            // Добавляем фильтры в нужном порядке
-            if (!string.IsNullOrEmpty(searchParams.MitNumber)) query.Add("fq", $"mi.mitnumber:{searchParams.MitNumber}");
-            if (!string.IsNullOrEmpty(searchParams.Type)) query.Add("fq", $"mi.mitype:*{searchParams.Type}*");
-            if (!string.IsNullOrEmpty(searchParams.Org)) query.Add("fq", $"org_title:*{searchParams.Org}*");
-            if (!string.IsNullOrEmpty(searchParams.Number)) query.Add("fq", $"mi.number:{searchParams.Number}");
+            string requestend = "q=*&fl=vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number,verification_date,valid_date,applicability,result_docnum&sort=verification_date+desc,org_title+asc&rows=100&start=" + searchParams.StartPos;
+            if (!string.IsNullOrEmpty(searchParams.Number)) requestend = $"fq=mi.number:{searchParams.Number}&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.Org)) requestend = $"fq=org_title:*{searchParams.Org}*&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.Type)) requestend = $"fq=mi.mitype:*{searchParams.Type}*&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.MitNumber)) requestend = $"fq=mi.mitnumber:{searchParams.MitNumber}&" + requestend;
             // Здесь можно добавить обработку новых полей
 
-            string requestend = query.ToString();
+            try
+            {
+                string responseBody = await GetWithRetryAsync(BaseRequest + requestend);
+                var jsonResponse = JObject.Parse(responseBody);
+                numFound = (int?)jsonResponse.SelectToken("response.numFound") ?? 0;
+                var docsArray = (JArray)jsonResponse["response"]["docs"];
+                foreach (var doc in docsArray)
+                {
+                    docs.Add(ParseVriDoc(doc));
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+            return (docs, numFound, error);
+        }
+
+        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams, int rows)
+        {
+            var docs = new List<VriDoc>();
+            int numFound = 0;
+            string error = null;
+
+            string requestend = $"q=*&fl=vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number,verification_date,valid_date,applicability,result_docnum&sort=verification_date+desc,org_title+asc&rows={rows}&start=" + searchParams.StartPos;
+            if (!string.IsNullOrEmpty(searchParams.Number)) requestend = $"fq=mi.number:{searchParams.Number}&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.Org)) requestend = $"fq=org_title:*{searchParams.Org}*&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.Type)) requestend = $"fq=mi.mitype:*{searchParams.Type}*&" + requestend;
+            if (!string.IsNullOrEmpty(searchParams.MitNumber)) requestend = $"fq=mi.mitnumber:{searchParams.MitNumber}&" + requestend;
+            // Здесь можно добавить обработку новых полей
 
             try
             {
