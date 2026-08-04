@@ -38,28 +38,32 @@ namespace ArshinSearch
         private const string BaseRequest = "https://fgis.gost.ru/fundmetrology/cm/xcdb/vri/select?";
         private const string VriInfoUrl = "https://fgis.gost.ru/fundmetrology/cm/iaux/vri/";
 
+        private const string FieldList =
+            "vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number," +
+            "verification_date,valid_date,applicability,result_docnum";
+        private const string SortOrder = "verification_date desc,org_title asc";
+        private const int DefaultRows = 100;
+
+        private const int MaxAttempts = 2;
+        private const int RetryDelayMs = 1500;
+
         public ArshinApi()
         {
             client = new HttpClient();
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36");
         }
 
-        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams)
+        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams, int rows = DefaultRows)
         {
             var docs = new List<VriDoc>();
             int numFound = 0;
             string error = null;
 
-            string requestend = "q=*&fl=vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number,verification_date,valid_date,applicability,result_docnum&sort=verification_date+desc,org_title+asc&rows=100&start=" + searchParams.StartPos;
-            if (!string.IsNullOrEmpty(searchParams.Number)) requestend = $"fq=mi.number:{searchParams.Number}&" + requestend;
-            if (!string.IsNullOrEmpty(searchParams.Org)) requestend = $"fq=org_title:*{searchParams.Org}*&" + requestend;
-            if (!string.IsNullOrEmpty(searchParams.Type)) requestend = $"fq=mi.mitype:*{searchParams.Type}*&" + requestend;
-            if (!string.IsNullOrEmpty(searchParams.MitNumber)) requestend = $"fq=mi.mitnumber:{searchParams.MitNumber}&" + requestend;
-            // Здесь можно добавить обработку новых полей
+            string url = BuildSearchUrl(searchParams, rows);
 
             try
             {
-                string responseBody = await GetWithRetryAsync(BaseRequest + requestend);
+                string responseBody = await GetWithRetryAsync(url).ConfigureAwait(false);
                 var jsonResponse = JObject.Parse(responseBody);
                 numFound = (int?)jsonResponse.SelectToken("response.numFound") ?? 0;
                 var docsArray = (JArray)jsonResponse["response"]["docs"];
@@ -72,37 +76,7 @@ namespace ArshinSearch
             {
                 error = ex.Message;
             }
-            return (docs, numFound, error);
-        }
 
-        public async Task<(List<VriDoc> docs, int numFound, string error)> SearchAsync(SearchParams searchParams, int rows)
-        {
-            var docs = new List<VriDoc>();
-            int numFound = 0;
-            string error = null;
-
-            string requestend = $"q=*&fl=vri_id,org_title,mi.mitnumber,mi.mititle,mi.mitype,mi.modification,mi.number,verification_date,valid_date,applicability,result_docnum&sort=verification_date+desc,org_title+asc&rows={rows}&start=" + searchParams.StartPos;
-            if (!string.IsNullOrEmpty(searchParams.Number)) requestend = $"fq=mi.number:{searchParams.Number}&" + requestend;
-            if (!string.IsNullOrEmpty(searchParams.Org)) requestend = $"fq=org_title:*{searchParams.Org}*&" + requestend;
-            if (!string.IsNullOrEmpty(searchParams.Type)) requestend = $"fq=mi.mitype:*{searchParams.Type}*&" + requestend;
-            if (!string.IsNullOrEmpty(searchParams.MitNumber)) requestend = $"fq=mi.mitnumber:{searchParams.MitNumber}&" + requestend;
-            // Здесь можно добавить обработку новых полей
-
-            try
-            {
-                string responseBody = await GetWithRetryAsync(BaseRequest + requestend);
-                var jsonResponse = JObject.Parse(responseBody);
-                numFound = (int?)jsonResponse.SelectToken("response.numFound") ?? 0;
-                var docsArray = (JArray)jsonResponse["response"]["docs"];
-                foreach (var doc in docsArray)
-                {
-                    docs.Add(ParseVriDoc(doc));
-                }
-            }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-            }
             return (docs, numFound, error);
         }
 
@@ -110,7 +84,9 @@ namespace ArshinSearch
         {
             try
             {
-                string responseBody = await GetWithRetryAsync(VriInfoUrl + vriId);
+                // vriId подставляется в путь, а не в query-строку, поэтому экранируем отдельно
+                string url = VriInfoUrl + Uri.EscapeDataString(vriId ?? string.Empty);
+                string responseBody = await GetWithRetryAsync(url).ConfigureAwait(false);
                 var jsonResponse = JObject.Parse(responseBody);
                 return (string)jsonResponse.SelectToken("result.vriInfo.miOwner") ?? "";
             }
@@ -118,6 +94,32 @@ namespace ArshinSearch
             {
                 return "Ошибка";
             }
+        }
+
+        private static string BuildSearchUrl(SearchParams searchParams, int rows)
+        {
+            var queryParts = new List<string>();
+
+            AddFilter(queryParts, "mi.number", searchParams.Number);
+            AddFilter(queryParts, "org_title", searchParams.Org, wildcard: true);
+            AddFilter(queryParts, "mi.mitype", searchParams.Type, wildcard: true);
+            AddFilter(queryParts, "mi.mitnumber", searchParams.MitNumber);
+
+            queryParts.Add("q=" + Uri.EscapeDataString("*"));
+            queryParts.Add("fl=" + Uri.EscapeDataString(FieldList));
+            queryParts.Add("sort=" + Uri.EscapeDataString(SortOrder));
+            queryParts.Add("rows=" + rows.ToString(CultureInfo.InvariantCulture));
+            queryParts.Add("start=" + Uri.EscapeDataString(searchParams.StartPos ?? "0"));
+
+            return BaseRequest + string.Join("&", queryParts);
+        }
+        private static void AddFilter(List<string> queryParts, string field, string value, bool wildcard = false)
+        {
+            if (string.IsNullOrEmpty(value))
+                return;
+
+            string rawFilter = wildcard ? $"{field}:*{value}*" : $"{field}:{value}";
+            queryParts.Add("fq=" + Uri.EscapeDataString(rawFilter));
         }
 
         private static VriDoc ParseVriDoc(JToken doc)
@@ -155,24 +157,21 @@ namespace ArshinSearch
 
         private async Task<string> GetWithRetryAsync(string url)
         {
-            using (var response = await client.GetAsync(url))
+            for (int attempt = 1; attempt <= MaxAttempts; attempt++)
             {
-                if ((int)response.StatusCode == 429)
+                using (var response = await client.GetAsync(url).ConfigureAwait(false))
                 {
-                    await Task.Delay(1500);
-                    using (var retryResponse = await client.GetAsync(url))
+                    if ((int)response.StatusCode != 429)
                     {
-                        if ((int)retryResponse.StatusCode == 429)
-                        {
-                            throw new Exception("Сервер вернул TooManyRequests (429) дважды подряд");
-                        }
-                        retryResponse.EnsureSuccessStatusCode();
-                        return await retryResponse.Content.ReadAsStringAsync();
+                        response.EnsureSuccessStatusCode();
+                        return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     }
+                    if (attempt == MaxAttempts)
+                        throw new HttpRequestException($"Сервер вернул TooManyRequests (429) {MaxAttempts} раза подряд");
                 }
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync();
+                await Task.Delay(RetryDelayMs).ConfigureAwait(false);
             }
+            throw new HttpRequestException("Не удалось выполнить запрос");
         }
     }
 }
